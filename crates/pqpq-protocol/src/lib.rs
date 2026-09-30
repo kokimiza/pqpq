@@ -1,8 +1,8 @@
 //! Transport-independent protocol shared by server, terminal and browser.
 //!
-//! All integers are big-endian (network byte order). Stream messages are
-//! framed as `u32 length + body`; every datagram starts with a version byte
-//! and a kind byte.
+//! Stream messages are framed as `u32` big-endian length + postcard body.
+//! Every datagram starts with a version byte and a kind byte; snapshot
+//! fragments add a fixed big-endian header before the postcard payload.
 
 mod codec;
 mod messages;

@@ -1,5 +1,8 @@
 use std::fmt;
 
+use serde::Serialize;
+use serde::de::DeserializeOwned;
+
 use crate::{
     DATAGRAM_VERSION, MAX_FRAME_LEN, MAX_PENDING_SNAPSHOTS, MAX_SNAPSHOT_FRAGMENTS,
     MAX_SNAPSHOT_LEN, SNAPSHOT_TIMEOUT_MS,
@@ -7,7 +10,8 @@ use crate::{
 
 pub(crate) const KIND_INPUT: u8 = 1;
 pub(crate) const KIND_SNAPSHOT: u8 = 2;
-/// version, kind, tick, revision, index, count
+/// Fixed-width, big-endian: version, kind, tick, revision, index, count.
+/// Kept hand-written because its size decides how much payload fits.
 const FRAGMENT_HEADER_LEN: usize = 1 + 1 + 8 + 8 + 1 + 1;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -31,105 +35,40 @@ impl fmt::Display for DecodeError {
 
 impl std::error::Error for DecodeError {}
 
-#[derive(Default)]
-pub(crate) struct Writer(pub Vec<u8>);
-
-impl Writer {
-    pub fn u8(&mut self, v: u8) {
-        self.0.push(v);
-    }
-    pub fn u16(&mut self, v: u16) {
-        self.0.extend_from_slice(&v.to_be_bytes());
-    }
-    pub fn u32(&mut self, v: u32) {
-        self.0.extend_from_slice(&v.to_be_bytes());
-    }
-    pub fn u64(&mut self, v: u64) {
-        self.0.extend_from_slice(&v.to_be_bytes());
-    }
-    pub fn bool(&mut self, v: bool) {
-        self.u8(v as u8);
-    }
-    pub fn f32(&mut self, v: f32) {
-        self.u32(v.to_bits());
-    }
-    /// Callers keep strings within the limits checked by `Reader::str`.
-    pub fn str(&mut self, s: &str) {
-        self.u16(s.len() as u16);
-        self.0.extend_from_slice(s.as_bytes());
+/// Decodes one postcard body; every byte must belong to the message.
+pub(crate) fn decode_body<T: DeserializeOwned>(body: &[u8]) -> Result<T, DecodeError> {
+    let (value, rest) = postcard::take_from_bytes(body).map_err(|e| match e {
+        postcard::Error::DeserializeUnexpectedEnd => DecodeError::Truncated,
+        _ => DecodeError::Invalid("message"),
+    })?;
+    if rest.is_empty() {
+        Ok(value)
+    } else {
+        Err(DecodeError::TrailingBytes)
     }
 }
 
-pub(crate) struct Reader<'a> {
-    buf: &'a [u8],
+/// Appends the postcard body of `value` to `prefix`.
+pub(crate) fn encode_after<T: Serialize>(prefix: Vec<u8>, value: &T) -> Vec<u8> {
+    // Only fails for types serde cannot represent, which none of ours are.
+    postcard::to_extend(value, prefix).expect("protocol types always serialize")
 }
 
-impl<'a> Reader<'a> {
-    pub fn new(buf: &'a [u8]) -> Self {
-        Reader { buf }
-    }
-    fn take(&mut self, n: usize) -> Result<&'a [u8], DecodeError> {
-        if self.buf.len() < n {
-            return Err(DecodeError::Truncated);
-        }
-        let (head, rest) = self.buf.split_at(n);
-        self.buf = rest;
-        Ok(head)
-    }
-    pub fn u8(&mut self) -> Result<u8, DecodeError> {
-        Ok(self.take(1)?[0])
-    }
-    pub fn u16(&mut self) -> Result<u16, DecodeError> {
-        Ok(u16::from_be_bytes(self.take(2)?.try_into().unwrap()))
-    }
-    pub fn u32(&mut self) -> Result<u32, DecodeError> {
-        Ok(u32::from_be_bytes(self.take(4)?.try_into().unwrap()))
-    }
-    pub fn u64(&mut self) -> Result<u64, DecodeError> {
-        Ok(u64::from_be_bytes(self.take(8)?.try_into().unwrap()))
-    }
-    pub fn bool(&mut self) -> Result<bool, DecodeError> {
-        match self.u8()? {
-            0 => Ok(false),
-            1 => Ok(true),
-            _ => Err(DecodeError::Invalid("bool")),
-        }
-    }
-    pub fn f32(&mut self) -> Result<f32, DecodeError> {
-        let v = f32::from_bits(self.u32()?);
-        if v.is_finite() {
-            Ok(v)
-        } else {
-            Err(DecodeError::Invalid("float"))
-        }
-    }
-    pub fn str(&mut self, max_bytes: usize) -> Result<String, DecodeError> {
-        let n = self.u16()? as usize;
-        if n > max_bytes {
-            return Err(DecodeError::Invalid("string length"));
-        }
-        let bytes = self.take(n)?;
-        String::from_utf8(bytes.to_vec()).map_err(|_| DecodeError::Invalid("utf-8"))
-    }
-    pub fn rest(&mut self) -> &'a [u8] {
-        std::mem::take(&mut self.buf)
-    }
-    pub fn finish(&self) -> Result<(), DecodeError> {
-        if self.buf.is_empty() {
-            Ok(())
-        } else {
-            Err(DecodeError::TrailingBytes)
-        }
-    }
+/// `u32` big-endian length prefix + postcard body, for the control stream.
+pub(crate) fn encode_frame<T: Serialize>(value: &T) -> Vec<u8> {
+    let mut out = encode_after(vec![0; 4], value);
+    let len = (out.len() - 4) as u32;
+    out[..4].copy_from_slice(&len.to_be_bytes());
+    out
 }
 
-/// Wraps a message body with its `u32` length prefix.
-pub(crate) fn frame(body: impl FnOnce(&mut Writer)) -> Vec<u8> {
-    let mut w = Writer(vec![0; 4]);
-    body(&mut w);
-    let len = (w.0.len() - 4) as u32;
-    w.0[..4].copy_from_slice(&len.to_be_bytes());
-    w.0
+/// Every datagram starts with `[DATAGRAM_VERSION, kind]`.
+pub(crate) fn datagram_body(datagram: &[u8], kind: u8) -> Result<&[u8], DecodeError> {
+    match datagram {
+        [DATAGRAM_VERSION, k, body @ ..] if *k == kind => Ok(body),
+        [_, _, ..] => Err(DecodeError::Invalid("datagram header")),
+        _ => Err(DecodeError::Truncated),
+    }
 }
 
 /// Splits a byte stream into message bodies. Handles split and coalesced
@@ -186,23 +125,22 @@ pub struct SnapshotFragment {
 
 impl SnapshotFragment {
     pub fn decode(datagram: &[u8]) -> Result<Self, DecodeError> {
-        let mut r = Reader::new(datagram);
-        if r.u8()? != DATAGRAM_VERSION {
-            return Err(DecodeError::Invalid("datagram version"));
+        datagram_body(datagram, KIND_SNAPSHOT)?;
+        if datagram.len() < FRAGMENT_HEADER_LEN {
+            return Err(DecodeError::Truncated);
         }
-        if r.u8()? != KIND_SNAPSHOT {
-            return Err(DecodeError::Invalid("datagram kind"));
-        }
-        let (tick, room_revision, index, count) = (r.u64()?, r.u64()?, r.u8()?, r.u8()?);
+        let (header, payload) = datagram.split_at(FRAGMENT_HEADER_LEN);
+        let u64_at = |i: usize| u64::from_be_bytes(header[i..i + 8].try_into().unwrap());
+        let (index, count) = (header[18], header[19]);
         if count == 0 || count as usize > MAX_SNAPSHOT_FRAGMENTS || index >= count {
             return Err(DecodeError::Invalid("fragment index"));
         }
         Ok(SnapshotFragment {
-            tick,
-            room_revision,
+            tick: u64_at(2),
+            room_revision: u64_at(10),
             index,
             count,
-            payload: r.rest().to_vec(),
+            payload: payload.to_vec(),
         })
     }
 }
@@ -235,15 +173,13 @@ pub fn fragment_snapshot(
             .into_iter()
             .enumerate()
             .map(|(i, part)| {
-                let mut w = Writer::default();
-                w.u8(DATAGRAM_VERSION);
-                w.u8(KIND_SNAPSHOT);
-                w.u64(tick);
-                w.u64(room_revision);
-                w.u8(i as u8);
-                w.u8(count as u8);
-                w.0.extend_from_slice(part);
-                w.0
+                let mut d = Vec::with_capacity(FRAGMENT_HEADER_LEN + part.len());
+                d.extend([DATAGRAM_VERSION, KIND_SNAPSHOT]);
+                d.extend(tick.to_be_bytes());
+                d.extend(room_revision.to_be_bytes());
+                d.extend([i as u8, count as u8]);
+                d.extend_from_slice(part);
+                d
             })
             .collect(),
     )
@@ -323,8 +259,8 @@ mod tests {
 
     #[test]
     fn frames_survive_split_and_coalesced_reads() {
-        let a = frame(|w| w.u8(1));
-        let b = frame(|w| w.str("hello"));
+        let a = encode_frame(&1u8);
+        let b = encode_frame(&"hello"); // varint length + 5 bytes
         let joined: Vec<u8> = a.iter().chain(&b).copied().collect();
         let mut d = FrameDecoder::default();
         for byte in &joined[..3] {
@@ -333,7 +269,7 @@ mod tests {
         }
         d.push(&joined[3..]);
         assert_eq!(d.next_frame(), Ok(Some(vec![1])));
-        assert_eq!(d.next_frame().unwrap().unwrap().len(), 7);
+        assert_eq!(d.next_frame().unwrap().unwrap().len(), 6);
         assert_eq!(d.next_frame(), Ok(None));
     }
 
@@ -352,6 +288,22 @@ mod tests {
         }
         assert!(d.buf.is_empty());
         assert_eq!(d.next_frame(), Err(DecodeError::FrameTooLarge));
+    }
+
+    #[test]
+    fn datagram_header_is_checked() {
+        assert_eq!(datagram_body(&[DATAGRAM_VERSION, KIND_INPUT, 9], KIND_INPUT), Ok(&[9][..]));
+        assert!(datagram_body(&[DATAGRAM_VERSION + 1, KIND_INPUT], KIND_INPUT).is_err());
+        assert!(datagram_body(&[DATAGRAM_VERSION, KIND_SNAPSHOT], KIND_INPUT).is_err());
+        assert_eq!(datagram_body(&[DATAGRAM_VERSION], KIND_INPUT), Err(DecodeError::Truncated));
+        assert_eq!(SnapshotFragment::decode(&[DATAGRAM_VERSION, KIND_SNAPSHOT, 0]), Err(DecodeError::Truncated));
+    }
+
+    #[test]
+    fn trailing_bytes_are_rejected() {
+        assert_eq!(decode_body::<u8>(&[1]), Ok(1));
+        assert_eq!(decode_body::<u8>(&[1, 2]), Err(DecodeError::TrailingBytes));
+        assert_eq!(decode_body::<u16>(&[0x80]), Err(DecodeError::Truncated));
     }
 
     #[test]

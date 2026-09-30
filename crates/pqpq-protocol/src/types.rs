@@ -1,11 +1,14 @@
 use std::fmt;
 
+use serde::{Deserialize, Serialize};
+
 pub const MAX_USERNAME_BYTES: usize = 48;
 pub const MAX_ROOM_ID_LEN: usize = 32;
 
 /// Assigned by the server and never reused within a process; display names are
 /// not identifiers.
-#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct PlayerId(pub u64);
 
 impl fmt::Display for PlayerId {
@@ -77,17 +80,28 @@ pub fn validate_room_id(room: &str) -> Result<(), InputError> {
     Ok(())
 }
 
+/// Enums travel as their explicit `u8` code, so reordering variants can never
+/// change the wire format; unknown codes fail to decode.
 macro_rules! wire_enum {
     ($(#[$m:meta])* $name:ident { $($variant:ident = $v:literal),* $(,)? }) => {
         $(#[$m])*
-        #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+        #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+        #[serde(into = "u8", try_from = "u8")]
         pub enum $name { $($variant = $v),* }
 
-        impl $name {
-            pub fn from_u8(v: u8) -> Option<Self> {
+        impl From<$name> for u8 {
+            fn from(v: $name) -> u8 {
+                v as u8
+            }
+        }
+
+        impl TryFrom<u8> for $name {
+            type Error = &'static str;
+
+            fn try_from(v: u8) -> Result<Self, Self::Error> {
                 match v {
-                    $($v => Some($name::$variant),)*
-                    _ => None,
+                    $($v => Ok($name::$variant),)*
+                    _ => Err(concat!("unknown ", stringify!($name))),
                 }
             }
         }

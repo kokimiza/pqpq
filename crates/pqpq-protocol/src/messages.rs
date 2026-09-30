@@ -1,23 +1,35 @@
-use crate::codec::{DecodeError, KIND_INPUT, Reader, Writer, frame};
+//! Message types. Bodies are postcard (varint integers, little-endian floats,
+//! message tags in declaration order); limits are enforced while decoding, so
+//! a decoded message is always within range.
+
+use serde::{Deserialize, Serialize};
+
+use crate::codec::{
+    DecodeError, KIND_INPUT, datagram_body, decode_body, encode_after, encode_frame,
+};
 use crate::types::*;
-use crate::{DATAGRAM_VERSION, MAX_ROOM_ID_LEN, MAX_USERNAME_BYTES};
+use crate::DATAGRAM_VERSION;
 
 const MAX_ERROR_MESSAGE: usize = 256;
 const MAX_ROSTER: usize = 1024;
 const MAX_CARS: usize = 255;
 
 /// Current controls. Steering is -1 (right), 0 or 1 (left).
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Controls {
     pub throttle: bool,
     pub brake: bool,
+    #[serde(deserialize_with = "limit::steering")]
     pub steering: i8,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Join {
     pub protocol_version: u32,
+    /// Length is checked here, content by validate_username.
+    #[serde(deserialize_with = "limit::username")]
     pub username: String,
+    #[serde(deserialize_with = "limit::room_id")]
     pub room_id: String,
     pub course_id: u32,
     pub course_version: u32,
@@ -25,7 +37,7 @@ pub struct Join {
 }
 
 /// Client to server, over the reliable control stream.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum ClientMessage {
     Join(Join),
     Ready,
@@ -35,40 +47,45 @@ pub enum ClientMessage {
 }
 
 /// Client to server, unreliable. Carries only controls, never positions.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct InputDatagram {
     pub sequence: u64,
     pub controls: Controls,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct RosterEntry {
     pub player_id: PlayerId,
+    #[serde(deserialize_with = "limit::username")]
     pub username: String,
     pub role: Role,
     pub ready: bool,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct GridSlot {
     pub player_id: PlayerId,
+    #[serde(deserialize_with = "limit::finite2")]
     pub position: [f32; 2],
+    #[serde(deserialize_with = "limit::finite")]
     pub direction: f32,
 }
 
 /// A scheduled start. Entrants are fixed by `grid`.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RaceStart {
     pub start_id: u64,
     pub start_tick: u64,
     /// Server tick when this was sent, for the countdown.
     pub server_tick: u64,
+    #[serde(deserialize_with = "limit::cars")]
     pub grid: Vec<GridSlot>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ResultEntry {
     pub player_id: PlayerId,
+    #[serde(deserialize_with = "limit::username")]
     pub username: String,
     pub status: CarStatus,
     pub laps: u8,
@@ -76,11 +93,13 @@ pub struct ResultEntry {
     pub finish_time_ms: Option<u32>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Joined {
     pub player_id: PlayerId,
+    #[serde(deserialize_with = "limit::room_id")]
     pub room_id: String,
     pub role: Role,
+    #[serde(deserialize_with = "limit::roster")]
     pub roster: Vec<RosterEntry>,
     pub room_revision: u64,
     pub phase: RacePhase,
@@ -94,11 +113,12 @@ pub struct Joined {
     /// Racers needed before a start, shown in the waiting room.
     pub min_racers: u8,
     /// Filled when joining a finished room.
+    #[serde(deserialize_with = "limit::cars")]
     pub results: Vec<ResultEntry>,
 }
 
 /// Server to client, over the reliable control stream.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ServerMessage {
     Joined(Joined),
     PlayerJoined {
@@ -126,11 +146,16 @@ pub enum ServerMessage {
     },
     RaceFinished {
         end_tick: u64,
+        #[serde(deserialize_with = "limit::cars")]
         results: Vec<ResultEntry>,
         room_revision: u64,
     },
     Error {
         code: ErrorCode,
+        #[serde(
+            serialize_with = "limit::truncate_message",
+            deserialize_with = "limit::message"
+        )]
         message: String,
         fatal: bool,
     },
@@ -165,11 +190,14 @@ impl ServerMessage {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CarSnapshot {
     pub player_id: PlayerId,
+    #[serde(deserialize_with = "limit::finite2")]
     pub position: [f32; 2],
+    #[serde(deserialize_with = "limit::finite2")]
     pub velocity: [f32; 2],
+    #[serde(deserialize_with = "limit::finite")]
     pub direction: f32,
     pub laps: u8,
     pub next_checkpoint: u8,
@@ -179,7 +207,7 @@ pub struct CarSnapshot {
 }
 
 /// Complete world state of one room at one tick, sent unreliably.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct GameSnapshot {
     pub tick: u64,
     pub room_revision: u64,
@@ -188,455 +216,141 @@ pub struct GameSnapshot {
     pub start_tick: u64,
     /// Entrants fixed at start, the denominator of the position display.
     pub entrants: u8,
+    #[serde(deserialize_with = "limit::cars")]
     pub cars: Vec<CarSnapshot>,
     /// Receiver-specific: newest input sequence consumed by the server.
     pub last_processed_input: u64,
 }
 
-trait Wire: Sized {
-    fn put(&self, w: &mut Writer);
-    fn get(r: &mut Reader) -> Result<Self, DecodeError>;
-}
+/// Range checks run inside deserialization; a violation fails the decode.
+mod limit {
+    use serde::de::Error;
+    use serde::{Deserialize, Deserializer, Serializer};
 
-macro_rules! wire_enums {
-    ($($t:ident),*) => {$(
-        impl Wire for $t {
-            fn put(&self, w: &mut Writer) {
-                w.u8(*self as u8);
-            }
-            fn get(r: &mut Reader) -> Result<Self, DecodeError> {
-                $t::from_u8(r.u8()?).ok_or(DecodeError::Invalid(stringify!($t)))
-            }
+    use crate::{MAX_ROOM_ID_LEN, MAX_USERNAME_BYTES};
+
+    fn bounded_str<'de, D: Deserializer<'de>>(d: D, max: usize) -> Result<String, D::Error> {
+        let s = String::deserialize(d)?;
+        if s.len() > max {
+            return Err(D::Error::custom("string too long"));
         }
-    )*};
-}
-wire_enums!(
-    Role,
-    RacePhase,
-    CarStatus,
-    LeaveReason,
-    CancelReason,
-    ErrorCode
-);
+        Ok(s)
+    }
 
-impl Wire for PlayerId {
-    fn put(&self, w: &mut Writer) {
-        w.u64(self.0);
-    }
-    fn get(r: &mut Reader) -> Result<Self, DecodeError> {
-        Ok(PlayerId(r.u64()?))
-    }
-}
-
-fn put_list<T: Wire>(w: &mut Writer, items: &[T]) {
-    w.u16(items.len() as u16);
-    items.iter().for_each(|i| i.put(w));
-}
-
-fn get_list<T: Wire>(r: &mut Reader, max: usize) -> Result<Vec<T>, DecodeError> {
-    let n = r.u16()? as usize;
-    if n > max {
-        return Err(DecodeError::Invalid("list length"));
-    }
-    // Every element needs bytes, so a lying count fails with Truncated early.
-    let mut out = Vec::new();
-    for _ in 0..n {
-        out.push(T::get(r)?);
-    }
-    Ok(out)
-}
-
-impl Wire for RosterEntry {
-    fn put(&self, w: &mut Writer) {
-        self.player_id.put(w);
-        w.str(&self.username);
-        self.role.put(w);
-        w.bool(self.ready);
-    }
-    fn get(r: &mut Reader) -> Result<Self, DecodeError> {
-        Ok(RosterEntry {
-            player_id: PlayerId::get(r)?,
-            username: r.str(MAX_USERNAME_BYTES)?,
-            role: Role::get(r)?,
-            ready: r.bool()?,
-        })
-    }
-}
-
-impl Wire for GridSlot {
-    fn put(&self, w: &mut Writer) {
-        self.player_id.put(w);
-        w.f32(self.position[0]);
-        w.f32(self.position[1]);
-        w.f32(self.direction);
-    }
-    fn get(r: &mut Reader) -> Result<Self, DecodeError> {
-        Ok(GridSlot {
-            player_id: PlayerId::get(r)?,
-            position: [r.f32()?, r.f32()?],
-            direction: r.f32()?,
-        })
-    }
-}
-
-impl Wire for RaceStart {
-    fn put(&self, w: &mut Writer) {
-        w.u64(self.start_id);
-        w.u64(self.start_tick);
-        w.u64(self.server_tick);
-        put_list(w, &self.grid);
-    }
-    fn get(r: &mut Reader) -> Result<Self, DecodeError> {
-        Ok(RaceStart {
-            start_id: r.u64()?,
-            start_tick: r.u64()?,
-            server_tick: r.u64()?,
-            grid: get_list(r, MAX_CARS)?,
-        })
-    }
-}
-
-impl Wire for ResultEntry {
-    fn put(&self, w: &mut Writer) {
-        self.player_id.put(w);
-        w.str(&self.username);
-        self.status.put(w);
-        w.u8(self.laps);
-        w.u32(self.finish_time_ms.unwrap_or(u32::MAX));
-    }
-    fn get(r: &mut Reader) -> Result<Self, DecodeError> {
-        Ok(ResultEntry {
-            player_id: PlayerId::get(r)?,
-            username: r.str(MAX_USERNAME_BYTES)?,
-            status: CarStatus::get(r)?,
-            laps: r.u8()?,
-            finish_time_ms: Some(r.u32()?).filter(|t| *t != u32::MAX),
-        })
-    }
-}
-
-impl Wire for CarSnapshot {
-    fn put(&self, w: &mut Writer) {
-        self.player_id.put(w);
-        for v in [
-            self.position[0],
-            self.position[1],
-            self.velocity[0],
-            self.velocity[1],
-            self.direction,
-        ] {
-            w.f32(v);
+    fn bounded_vec<'de, D, T>(d: D, max: usize) -> Result<Vec<T>, D::Error>
+    where
+        D: Deserializer<'de>,
+        T: Deserialize<'de>,
+    {
+        let v = Vec::deserialize(d)?;
+        if v.len() > max {
+            return Err(D::Error::custom("list too long"));
         }
-        w.u8(self.laps);
-        w.u8(self.next_checkpoint);
-        w.u8(self.rank);
-        self.status.put(w);
+        Ok(v)
     }
-    fn get(r: &mut Reader) -> Result<Self, DecodeError> {
-        Ok(CarSnapshot {
-            player_id: PlayerId::get(r)?,
-            position: [r.f32()?, r.f32()?],
-            velocity: [r.f32()?, r.f32()?],
-            direction: r.f32()?,
-            laps: r.u8()?,
-            next_checkpoint: r.u8()?,
-            rank: r.u8()?,
-            status: CarStatus::get(r)?,
-        })
+
+    fn check<T, E: Error>(v: T, ok: bool, what: &'static str) -> Result<T, E> {
+        if ok { Ok(v) } else { Err(E::custom(what)) }
+    }
+
+    pub fn username<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+        bounded_str(d, MAX_USERNAME_BYTES)
+    }
+
+    pub fn room_id<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+        bounded_str(d, MAX_ROOM_ID_LEN)
+    }
+
+    pub fn message<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+        bounded_str(d, super::MAX_ERROR_MESSAGE)
+    }
+
+    /// Cut at a char boundary so a long reason never makes the frame invalid.
+    pub fn truncate_message<S: Serializer>(s: &str, ser: S) -> Result<S::Ok, S::Error> {
+        let mut end = s.len().min(super::MAX_ERROR_MESSAGE);
+        while !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        ser.serialize_str(&s[..end])
+    }
+
+    pub fn roster<'de, D, T>(d: D) -> Result<Vec<T>, D::Error>
+    where
+        D: Deserializer<'de>,
+        T: Deserialize<'de>,
+    {
+        bounded_vec(d, super::MAX_ROSTER)
+    }
+
+    pub fn cars<'de, D, T>(d: D) -> Result<Vec<T>, D::Error>
+    where
+        D: Deserializer<'de>,
+        T: Deserialize<'de>,
+    {
+        bounded_vec(d, super::MAX_CARS)
+    }
+
+    pub fn finite<'de, D: Deserializer<'de>>(d: D) -> Result<f32, D::Error> {
+        let v = f32::deserialize(d)?;
+        check(v, v.is_finite(), "non-finite float")
+    }
+
+    pub fn finite2<'de, D: Deserializer<'de>>(d: D) -> Result<[f32; 2], D::Error> {
+        let v = <[f32; 2]>::deserialize(d)?;
+        check(v, v.iter().all(|x| x.is_finite()), "non-finite float")
+    }
+
+    pub fn steering<'de, D: Deserializer<'de>>(d: D) -> Result<i8, D::Error> {
+        let v = i8::deserialize(d)?;
+        check(v, (-1..=1).contains(&v), "steering out of range")
     }
 }
 
 impl ClientMessage {
     /// Length-prefixed bytes for the control stream.
     pub fn encode_frame(&self) -> Vec<u8> {
-        frame(|w| match self {
-            ClientMessage::Join(j) => {
-                w.u8(1);
-                w.u32(j.protocol_version);
-                w.str(&j.username);
-                w.str(&j.room_id);
-                w.u32(j.course_id);
-                w.u32(j.course_version);
-                w.u32(j.physics_version);
-            },
-            ClientMessage::Ready => w.u8(2),
-            ClientMessage::Leave => w.u8(3),
-            ClientMessage::Ping { nonce } => {
-                w.u8(4);
-                w.u64(*nonce);
-            },
-            ClientMessage::Pong { nonce } => {
-                w.u8(5);
-                w.u64(*nonce);
-            },
-        })
+        encode_frame(self)
     }
 
     /// Decodes one frame body (without the length prefix).
     pub fn decode(body: &[u8]) -> Result<Self, DecodeError> {
-        let mut r = Reader::new(body);
-        let msg = match r.u8()? {
-            1 => ClientMessage::Join(Join {
-                protocol_version: r.u32()?,
-                // Length is checked here, content by validate_username.
-                username: r.str(MAX_USERNAME_BYTES)?,
-                room_id: r.str(MAX_ROOM_ID_LEN)?,
-                course_id: r.u32()?,
-                course_version: r.u32()?,
-                physics_version: r.u32()?,
-            }),
-            2 => ClientMessage::Ready,
-            3 => ClientMessage::Leave,
-            4 => ClientMessage::Ping { nonce: r.u64()? },
-            5 => ClientMessage::Pong { nonce: r.u64()? },
-            _ => return Err(DecodeError::Invalid("client message type")),
-        };
-        r.finish()?;
-        Ok(msg)
+        decode_body(body)
     }
 }
 
 impl ServerMessage {
     pub fn encode_frame(&self) -> Vec<u8> {
-        frame(|w| match self {
-            ServerMessage::Joined(j) => {
-                w.u8(1);
-                j.player_id.put(w);
-                w.str(&j.room_id);
-                j.role.put(w);
-                put_list(w, &j.roster);
-                w.u64(j.room_revision);
-                j.phase.put(w);
-                w.u64(j.server_tick);
-                w.bool(j.start.is_some());
-                if let Some(s) = &j.start {
-                    s.put(w);
-                }
-                w.u32(j.course_id);
-                w.u32(j.course_version);
-                w.u32(j.physics_version);
-                w.u16(j.tick_hz);
-                w.u8(j.laps);
-                w.u8(j.min_racers);
-                put_list(w, &j.results);
-            },
-            ServerMessage::PlayerJoined {
-                entry,
-                room_revision,
-            } => {
-                w.u8(2);
-                entry.put(w);
-                w.u64(*room_revision);
-            },
-            ServerMessage::PlayerLeft {
-                player_id,
-                reason,
-                room_revision,
-            } => {
-                w.u8(3);
-                player_id.put(w);
-                reason.put(w);
-                w.u64(*room_revision);
-            },
-            ServerMessage::ReadyChanged {
-                player_id,
-                ready,
-                room_revision,
-            } => {
-                w.u8(4);
-                player_id.put(w);
-                w.bool(*ready);
-                w.u64(*room_revision);
-            },
-            ServerMessage::RaceStart {
-                start,
-                room_revision,
-            } => {
-                w.u8(5);
-                start.put(w);
-                w.u64(*room_revision);
-            },
-            ServerMessage::RaceStartCancelled {
-                start_id,
-                reason,
-                room_revision,
-            } => {
-                w.u8(6);
-                w.u64(*start_id);
-                reason.put(w);
-                w.u64(*room_revision);
-            },
-            ServerMessage::RaceFinished {
-                end_tick,
-                results,
-                room_revision,
-            } => {
-                w.u8(7);
-                w.u64(*end_tick);
-                put_list(w, results);
-                w.u64(*room_revision);
-            },
-            ServerMessage::Error {
-                code,
-                message,
-                fatal,
-            } => {
-                w.u8(8);
-                code.put(w);
-                w.str(truncate(message, MAX_ERROR_MESSAGE));
-                w.bool(*fatal);
-            },
-            ServerMessage::Ping { nonce } => {
-                w.u8(9);
-                w.u64(*nonce);
-            },
-            ServerMessage::Pong { nonce } => {
-                w.u8(10);
-                w.u64(*nonce);
-            },
-        })
+        encode_frame(self)
     }
 
     pub fn decode(body: &[u8]) -> Result<Self, DecodeError> {
-        let mut r = Reader::new(body);
-        let msg = match r.u8()? {
-            1 => ServerMessage::Joined(Joined {
-                player_id: PlayerId::get(&mut r)?,
-                room_id: r.str(MAX_ROOM_ID_LEN)?,
-                role: Role::get(&mut r)?,
-                roster: get_list(&mut r, MAX_ROSTER)?,
-                room_revision: r.u64()?,
-                phase: RacePhase::get(&mut r)?,
-                server_tick: r.u64()?,
-                start: if r.bool()? {
-                    Some(RaceStart::get(&mut r)?)
-                } else {
-                    None
-                },
-                course_id: r.u32()?,
-                course_version: r.u32()?,
-                physics_version: r.u32()?,
-                tick_hz: r.u16()?,
-                laps: r.u8()?,
-                min_racers: r.u8()?,
-                results: get_list(&mut r, MAX_CARS)?,
-            }),
-            2 => ServerMessage::PlayerJoined {
-                entry: RosterEntry::get(&mut r)?,
-                room_revision: r.u64()?,
-            },
-            3 => ServerMessage::PlayerLeft {
-                player_id: PlayerId::get(&mut r)?,
-                reason: LeaveReason::get(&mut r)?,
-                room_revision: r.u64()?,
-            },
-            4 => ServerMessage::ReadyChanged {
-                player_id: PlayerId::get(&mut r)?,
-                ready: r.bool()?,
-                room_revision: r.u64()?,
-            },
-            5 => ServerMessage::RaceStart {
-                start: RaceStart::get(&mut r)?,
-                room_revision: r.u64()?,
-            },
-            6 => ServerMessage::RaceStartCancelled {
-                start_id: r.u64()?,
-                reason: CancelReason::get(&mut r)?,
-                room_revision: r.u64()?,
-            },
-            7 => ServerMessage::RaceFinished {
-                end_tick: r.u64()?,
-                results: get_list(&mut r, MAX_CARS)?,
-                room_revision: r.u64()?,
-            },
-            8 => ServerMessage::Error {
-                code: ErrorCode::get(&mut r)?,
-                message: r.str(MAX_ERROR_MESSAGE)?,
-                fatal: r.bool()?,
-            },
-            9 => ServerMessage::Ping { nonce: r.u64()? },
-            10 => ServerMessage::Pong { nonce: r.u64()? },
-            _ => return Err(DecodeError::Invalid("server message type")),
-        };
-        r.finish()?;
-        Ok(msg)
+        decode_body(body)
     }
-}
-
-fn truncate(s: &str, max: usize) -> &str {
-    let mut end = s.len().min(max);
-    while !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    &s[..end]
 }
 
 impl InputDatagram {
     pub fn encode(&self) -> Vec<u8> {
-        let mut w = Writer::default();
-        w.u8(DATAGRAM_VERSION);
-        w.u8(KIND_INPUT);
-        w.u64(self.sequence);
-        w.u8(self.controls.throttle as u8 | (self.controls.brake as u8) << 1);
-        w.u8(self.controls.steering as u8);
-        w.0
+        encode_after(vec![DATAGRAM_VERSION, KIND_INPUT], self)
     }
 
     pub fn decode(datagram: &[u8]) -> Result<Self, DecodeError> {
-        let mut r = Reader::new(datagram);
-        if r.u8()? != DATAGRAM_VERSION {
-            return Err(DecodeError::Invalid("datagram version"));
+        let input: InputDatagram = decode_body(datagram_body(datagram, KIND_INPUT)?)?;
+        // Sequences start at 1; 0 would sit below every processed boundary.
+        if input.sequence == 0 {
+            return Err(DecodeError::Invalid("input sequence"));
         }
-        if r.u8()? != KIND_INPUT {
-            return Err(DecodeError::Invalid("datagram kind"));
-        }
-        let sequence = r.u64()?;
-        let flags = r.u8()?;
-        let steering = r.u8()? as i8;
-        r.finish()?;
-        if flags > 0b11 || !(-1..=1).contains(&steering) || sequence == 0 {
-            return Err(DecodeError::Invalid("input"));
-        }
-        Ok(InputDatagram {
-            sequence,
-            controls: Controls {
-                throttle: flags & 1 != 0,
-                brake: flags & 2 != 0,
-                steering,
-            },
-        })
+        Ok(input)
     }
 }
 
 impl GameSnapshot {
     /// Body before fragmentation.
     pub fn encode(&self) -> Vec<u8> {
-        let mut w = Writer::default();
-        w.u64(self.tick);
-        w.u64(self.room_revision);
-        self.phase.put(&mut w);
-        w.u64(self.start_id);
-        w.u64(self.start_tick);
-        w.u8(self.entrants);
-        put_list(&mut w, &self.cars);
-        w.u64(self.last_processed_input);
-        w.0
+        encode_after(Vec::new(), self)
     }
 
     pub fn decode(body: &[u8]) -> Result<Self, DecodeError> {
-        let mut r = Reader::new(body);
-        let snap = GameSnapshot {
-            tick: r.u64()?,
-            room_revision: r.u64()?,
-            phase: RacePhase::get(&mut r)?,
-            start_id: r.u64()?,
-            start_tick: r.u64()?,
-            entrants: r.u8()?,
-            cars: get_list(&mut r, MAX_CARS)?,
-            last_processed_input: r.u64()?,
-        };
-        r.finish()?;
-        Ok(snap)
+        decode_body(body)
     }
 }
 
@@ -644,7 +358,8 @@ impl GameSnapshot {
 mod tests {
     use super::*;
     use crate::{
-        FrameDecoder, PROTOCOL_VERSION, SnapshotAssembler, SnapshotFragment, fragment_snapshot,
+        FrameDecoder, MAX_USERNAME_BYTES, PROTOCOL_VERSION, SnapshotAssembler, SnapshotFragment,
+        fragment_snapshot,
     };
 
     fn roundtrip_server(msg: ServerMessage) {
@@ -669,9 +384,10 @@ mod tests {
     }
 
     /// Known bytes: also checked against the WASM build by web/check.mjs.
-    pub const JOIN_FRAME: [u8; 32] = [
-        0, 0, 0, 28, 1, 0, 0, 0, 1, 0, 3, b'f', b'o', b'o', 0, 4, b'1', b'2', b'3', b'4', 0, 0, 0,
-        1, 0, 0, 0, 1, 0, 0, 0, 1,
+    /// u32 BE length, then postcard: tag 0 (Join), varint 1, "foo", "1234",
+    /// varints 1, 1, 1.
+    pub const JOIN_FRAME: [u8; 18] = [
+        0, 0, 0, 14, 0, 1, 3, b'f', b'o', b'o', 4, b'1', b'2', b'3', b'4', 1, 1, 1,
     ];
 
     #[test]
@@ -691,7 +407,8 @@ mod tests {
             },
         };
         let bytes = i.encode();
-        assert_eq!(bytes, [1, 1, 0, 0, 0, 0, 0, 0, 1, 2, 1, 0xff]);
+        // Header, varint 258, throttle, brake, steering as one i8 byte.
+        assert_eq!(bytes, [1, 1, 0x82, 0x02, 1, 0, 0xff]);
         assert_eq!(InputDatagram::decode(&bytes).unwrap(), i);
     }
 
@@ -702,7 +419,7 @@ mod tests {
             controls: Controls::default(),
         }
         .encode();
-        bad[11] = 2; // steering out of range
+        bad[5] = 2; // steering out of range
         assert!(InputDatagram::decode(&bad).is_err());
         let zero = InputDatagram {
             sequence: 0,
@@ -710,11 +427,34 @@ mod tests {
         }
         .encode();
         assert!(InputDatagram::decode(&zero).is_err());
-        assert!(ClientMessage::decode(&[2, 0]).is_err()); // trailing byte
-        assert!(ClientMessage::decode(&[1, 0, 0]).is_err()); // truncated
+        assert_eq!(ClientMessage::decode(&[1, 0]), Err(DecodeError::TrailingBytes));
+        assert_eq!(ClientMessage::decode(&[0, 0]), Err(DecodeError::Truncated));
+        assert!(ClientMessage::decode(&[9]).is_err()); // unknown message
         let mut invalid_utf8 = join().encode_frame()[4..].to_vec();
-        invalid_utf8[7] = 0xff;
+        invalid_utf8[3] = 0xff;
         assert!(ClientMessage::decode(&invalid_utf8).is_err());
+    }
+
+    #[test]
+    fn limits_are_enforced_while_decoding() {
+        let ClientMessage::Join(mut j) = join() else {
+            unreachable!()
+        };
+        j.username = "a".repeat(MAX_USERNAME_BYTES + 1);
+        let body = ClientMessage::Join(j).encode_frame();
+        assert!(ClientMessage::decode(&body[4..]).is_err());
+        // Unknown enum codes fail instead of mapping to some variant.
+        let mut left = ServerMessage::PlayerLeft {
+            player_id: PlayerId(1),
+            reason: LeaveReason::Left,
+            room_revision: 1,
+        }
+        .encode_frame();
+        left[6] = 7; // after length, tag and player id comes the reason
+        assert!(ServerMessage::decode(&left[4..]).is_err());
+        // Explicit codes: ErrorCode::InvalidUsername is 1, not its index 0.
+        let err = ServerMessage::error(ErrorCode::InvalidUsername, true).encode_frame();
+        assert_eq!(err[5], 1);
     }
 
     #[test]
@@ -798,6 +538,21 @@ mod tests {
     }
 
     #[test]
+    fn long_error_message_is_truncated_not_rejected() {
+        let long = ServerMessage::Error {
+            code: ErrorCode::Timeout,
+            message: "あ".repeat(200),
+            fatal: false,
+        };
+        let decoded = ServerMessage::decode(&long.encode_frame()[4..]).unwrap();
+        let ServerMessage::Error { message, .. } = decoded else {
+            unreachable!()
+        };
+        assert!(message.len() <= MAX_ERROR_MESSAGE);
+        assert!(message.chars().all(|c| c == 'あ'));
+    }
+
+    #[test]
     fn snapshot_roundtrips_through_fragments() {
         let car = CarSnapshot {
             player_id: PlayerId(1),
@@ -815,8 +570,8 @@ mod tests {
             phase: RacePhase::Racing,
             start_id: 1,
             start_tick: 90,
-            entrants: 40,
-            cars: vec![car; 40],
+            entrants: 60,
+            cars: vec![car; 60],
             last_processed_input: 77,
         };
         let body = snap.encode();
