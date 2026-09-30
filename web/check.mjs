@@ -7,7 +7,7 @@ import { initSync, reference_state, reference_join_frame, validate, Client } fro
 initSync({ module: await readFile(new URL("./pkg/pqpq_web_bg.wasm", import.meta.url)) });
 
 const REFERENCE = [12.652196453530346, -43.00848023940093, 1.3063283155510665, 0.04017250679584599, -0.010879175534572292];
-const JOIN_FRAME = [0, 0, 0, 28, 1, 0, 0, 0, 1, 0, 3, 102, 111, 111, 0, 4, 49, 50, 51, 52, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1];
+const JOIN_FRAME = [0, 0, 0, 14, 0, 1, 3, 102, 111, 111, 4, 49, 50, 51, 52, 1, 1, 1];
 const TOLERANCE = 1e-6;
 
 const failures = [];
