@@ -1,189 +1,118 @@
-# 🥊 pqpq
+# pqpq
 
-**P**eer-to-peer **Q**uick **P**unch **Q**uest
+ターミナルとブラウザから、名前と部屋IDだけで同じレースへ参加するゲームです。1コースを3周し、全員がReadyになると開始します。同名参加、観戦、衝突、順位、予測・補正・補間に対応します。
 
-ターミナル上で動作する、リアルタイム・フルP2P格闘ゲーム。  
-中央集権的なAPIサーバーを排除し、**PostgreSQL (Supabase)** をシグナリングとランキング基盤として活用する、サーバーレス・アーキテクチャの実験作。
+5クレートのCargo Workspaceです。`pqpq-client`がCUI、`pqpq-web`がWASM、`pqpq-server`が単一のゲームサーバ、`pqpq-protocol`が通信形式、`pqpq-sim`が共通の物理計算を担当します。Native QUICはquiche、WebTransportはwtransportを使用します。
 
-> 🎯 **コンセプト:** "ロジックはクライアント、データはDB、通信はP2P"  
-> 従来の「バックエンドがゲームロジックを持つ」構成を完全に排除し、Rust製バイナリに全てを集約。Supabaseは純粋な「データの墓場」として機能します。
+## ビルド
 
----
+Rust、`wasm32-unknown-unknown`、Node.jsを使用します。ネイティブ版のビルドにはC/C++ツールチェーンとquiche/BoringSSLのビルド環境が必要です。WindowsではMSVC Build Tools・CMake・NASM・libclangの場所を確認してください。[quicheのビルド手順](https://github.com/cloudflare/quiche#building)
 
-## 🌟 技術的新奇性：3つのエッジ
+リポジトリのルートで実行します。
 
-### 1. 🎮 Rollback Netcode in Rust
-物理的距離による遅延を吸収するため、**GGPO スタイルのロールバック・ネットコード**を実装。  
-WebRTC DataChannel で送信するのは「ゲーム状態」ではなく「入力（Input）」のみ。予測が外れた場合、数フレーム前の状態に巻き戻して再シミュレート。
-
-- Rust の `Copy` トレイトを活用した軽量な状態保存
-- 東京-ロンドン間でも体感遅延を最小化
-- 格闘ゲームの「読み合い」を物理法則から解放
-
-### 2. 📡 P2P カスケード配信（観戦モード）
-`pqpq watch` 実装時、ホストに負荷を集中させない **メッシュ・ストリーミング** を採用。  
-観戦者Bはホストからデータを受け取り、次の観戦者Cにリレー。ASCII文字列データ（数KB/s）なので、ブラウザ配信より遥かに効率的。
-
-- ホストの帯域を節約
-- 観戦者数が増えても線形スケール
-- ターミナルならではの超軽量配信
-
-### 3. 🏆 Ghost in the DB：自律的ランキング集計
-`match_results` が溜まる中、フロントエンドが毎回全件集計するのは非効率。  
-PostgreSQL の **Materialized View** を活用し、`pg_cron` で1時間ごとにイロレーティングを自動計算。
-
-```sql
--- 自律的に動くランキングエンジン
-CREATE MATERIALIZED VIEW player_rankings AS
-SELECT 
-    pubkey,
-    COUNT(*) FILTER (WHERE winner_pubkey = pubkey) AS wins,
-    COUNT(*) FILTER (WHERE loser_pubkey = pubkey) AS losses,
-    calculate_elo_rating(pubkey) AS rating
-FROM match_results
-GROUP BY pubkey
-ORDER BY rating DESC;
+```sh
+rustup target add wasm32-unknown-unknown
+cargo install wasm-bindgen-cli --version 0.2.129 --locked --root target/wasm-tools
+node scripts/build-web.mjs
+cargo build --workspace --all-targets --locked
 ```
 
-`pqpq rank` を叩くだけで、DB側で計算済みの「最強エンジニア・ランキング」を即座に取得。
+WASMとJSは `web/pkg/`、ネイティブ実行ファイルは `target/debug/` に生成します。既存のサーバを起動したままWindowsで再ビルドする場合は、実行ファイルのロックを避けるため `--target-dir target/verify` を指定できます。
 
----
+## ローカルで遊ぶ
 
-## 🏗️ システムアーキテクチャ：The Stateless Stack
+ブラウザのWebTransportにはTLS証明書が必要です。ローカルでは14日有効のECDSA証明書を作り、HTTPS経由でその証明書のSHA-256をブラウザへ渡します。ChromiumではローカルCAをHTTPSで信頼してもWebTransportで信頼しない場合があるため、この標準の証明書ハッシュ方式を使います。[WebTransportの証明書ハッシュ仕様](https://www.w3.org/TR/webtransport/#certificate-hashes)
 
-ロジックをバイナリ（Rust）側に寄せ、バックエンドは純粋なデータストアとして運用します。
-
-* **Frontend/Engine:** Rust + Ratatui (TUI)
-* **Networking:** `webrtc-rs` (P2P DataChannel / UDP)
-* **Signaling & Persistence:** Supabase (PostgreSQL + Realtime + RLS)
-* **Security:** Ed25519 署名 + Row Level Security (RLS)
-* **Netcode:** GGPO-style Rollback (Input-only transmission)
-
-### アーキテクチャ図
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    Rust Binary (pqpq)                       │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐     │
-│  │ Ratatui TUI  │  │ Rollback     │  │ Ed25519      │     │
-│  │ (80x24 ASCII)│  │ Netcode      │  │ Signer       │     │
-│  └──────────────┘  └──────────────┘  └──────────────┘     │
-│         │                  │                  │             │
-│         └──────────────────┴──────────────────┘             │
-│                           │                                 │
-└───────────────────────────┼─────────────────────────────────┘
-                            │
-        ┌───────────────────┼───────────────────┐
-        │                   │                   │
-   WebRTC P2P          Supabase           WebRTC P2P
-   (Input Only)     (Signaling Only)    (Input Only)
-        │                   │                   │
-        │            ┌──────┴──────┐            │
-        │            │ PostgreSQL  │            │
-        │            │  - rings    │            │
-        │            │  - results  │            │
-        │            │  - rankings │            │
-        │            │    (M.View) │            │
-        │            └─────────────┘            │
-        │                                       │
-        └───────────────────┬───────────────────┘
-                            │
-                    ┌───────┴───────┐
-                    │  Peer Client  │
-                    │   (Opponent)  │
-                    └───────────────┘
+```sh
+cargo run -p pqpq-server --example dev_cert
 ```
 
----
+生成処理は既存の証明書を上書きせず、OSの信頼ストアも変更しません。期限切れ時には別ディレクトリに生成し、`PQPQ_TLS_CERT` / `PQPQ_TLS_KEY`で指定します。
 
-## 🔄 接続シーケンス：The Zero-Logic Signaling
+PowerShellのサーバ用ターミナルで起動します。
 
-### Phase 1: リング設営 (Host)
-
-1. `pqpq host` を実行。Ed25519 キーペアを一時生成。
-2. Supabase の `rings` テーブルに `INSERT`。
-* `token`: 招待コード
-* `host_offer`: WebRTC Offer SDP
-* `host_pubkey`: 自身の公開鍵
-
-
-3. Supabase Realtime で自身のレコードの `UPDATE` を購読（Listen）開始。
-
-### Phase 2: 参加 (Guest)
-
-1. `pqpq join <TOKEN>` を実行。
-2. `rings` テーブルから `host_offer` を取得。
-3. 自身の `answer_sdp` を生成し、該当レコードを `UPDATE`。
-4. P2P 接続待機状態へ。
-
-### Phase 3: ゴング (P2P Established)
-
-1. Host が Realtime 通知を受け取り、`answer_sdp` を取得。
-2. P2P 接続が確立。以降のゲームデータ（座標・攻撃）は **Supabase を一切介さない。**
-3. 対戦終了後、勝者が署名付きリザルトを `match_results` へ送信。
-
----
-
-## 3. データモデル & 放置死対策 (PostgreSQL)
-
-### テーブル設計
-
-```sql
--- リング管理（シグナリング用）
-CREATE TABLE rings (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    token TEXT UNIQUE NOT NULL,
-    host_sdp TEXT NOT NULL,
-    guest_sdp TEXT,
-    host_pubkey TEXT NOT NULL,
-    status TEXT DEFAULT 'open', -- open | matched
-    created_at TIMESTAMPTZ DEFAULT NOW()
-);
-
--- 戦績管理（ランキング用）
-CREATE TABLE match_results (
-    id SERIAL PRIMARY KEY,
-    winner_pubkey TEXT NOT NULL,
-    loser_pubkey TEXT NOT NULL,
-    signature TEXT NOT NULL, -- 敗者による署名（偽装防止）
-    raw_data TEXT NOT NULL,    -- "winner:A, loser:B, score:2-0" 形式の文字列
-    created_at TIMESTAMPTZ DEFAULT NOW()
-);
-
+```powershell
+$env:PQPQ_PIN_WEB_CERT = 'true'
+cargo run -p pqpq-server
 ```
 
-### 放置死（Ghost Record）対策
+Linux / macOSでは `PQPQ_PIN_WEB_CERT=true cargo run -p pqpq-server` です。
 
-Supabase の `pg_net` または `pg_cron` エクステンションを使用し、DB 側で自浄作用を持たせます。
+ブラウザで `https://localhost:8443/#room=1234` を開きます。自己署名証明書なのでHTTPSの警告が出ます。自分で起動したlocalhostであることを確認して開発用の例外を許可し、名前を入力してJOINします。これはローカル検証用の手順です。公開サーバでは公開CAの証明書を用い、例外許可もハッシュ設定も不要です。
 
-```sql
--- 15分以上経過した未成立のリング、または成立済みのリングを自動削除
-SELECT cron.schedule('cleanup-rings', '*/5 * * * *', 
-    $$ DELETE FROM rings WHERE created_at < NOW() - INTERVAL '15 minutes' $$
-);
+同じPCの別ターミナルでは、生成した証明書を明示して接続します。
 
+PowerShell:
+
+```powershell
+$env:PQPQ_CA_FILE = (Resolve-Path certs/localhost.pem).Path
+cargo run -p pqpq-client -- foo 1234
 ```
 
----
+Linux / macOS:
 
-## 4. 偽装対策：Evidence-Based Ranking
+```sh
+PQPQ_CA_FILE=certs/localhost.pem cargo run -p pqpq-client -- foo 1234
+```
 
-ランキングの信頼性を担保するため、対戦終了時に **「敗者の署名」** を取得する仕組みを導入します。
+2人以上が参加して全員Readyになると3秒後にスタートします。途中参加は観戦です。全員退出すると部屋と結果を削除し、同じ部屋IDで新しく始められます。
 
-1. **試合終了:** クライアント A が勝利。
-2. **署名要求:** A は B に対して「Aが勝利した」というデータの署名を P2P 経由で要求。
-3. **合意:** B のクライアントが（整合性を確認し）自身の秘密鍵で署名して A に返送。
-4. **提出:** A は「Bの署名付きリザルト」を Supabase に `INSERT`。
-5. **検証:** Supabase の **RLS** または **Check Constraint** により、署名が不正なデータは DB への書き込みを拒否。
+| 操作 | キー |
+| --- | --- |
+| アクセル | ↑ / W |
+| ブレーキ | ↓ / S |
+| 左右 | ← → / A D |
+| Ready | Enter / WebのREADYボタン |
+| 退出 | Q / CUIのCtrl+C / Webの退出ボタン |
 
-> [!TIP]
-> 敗者が悔しくてシグナルを切った（署名を拒否した）場合は「無効試合」となりますが、この「切断率」も統計として残すことで、マナーの悪いプレイヤーを可視化できます。
+CUIは80列×24行以上を使用します。キー解放通知のない端末では短時間の入力保持による互換モードになります。ブラウザのフォーカス喪失・非表示時は入力を中立化し、レース自体はサーバで進行します。
 
----
+## 接続先と運用
 
-## 5. UI/UX：Terminal Brutalism
+通常設定ではNative QUICはUDP 4433、WebTransportはUDP 8443、Web配信はTCP 8443でループバック待受します。TCPだけを許可してもレースには接続できません。
 
-* **Visuals:** ASCIIアートキャラが `80x24` のキャンバスで激突。
-* **Latency:** `webrtc-rs` による 20ms 以下の超低遅延バトル。
-* **CLI First:** * `pqpq list`: 現在立っている（Openな）リング一覧を表示。
-* `pqpq watch <TOKEN>`: (Future) 観戦モード。
+| 環境変数 | 既定値・用途 |
+| --- | --- |
+| `PQPQ_BIND_ADDR` | `127.0.0.1:4433`、Native UDP |
+| `PQPQ_WEBTRANSPORT_ADDR` | `127.0.0.1:8443`、WebTransport UDP |
+| `PQPQ_HTTPS_ADDR` | `127.0.0.1:8443`、HTTPS TCP |
+| `PQPQ_WEB_ORIGIN` | `https://localhost:8443`、参加を許可するWebページのOrigin |
+| `PQPQ_WEB_ROOT` | `web`、静的配布物 |
+| `PQPQ_TLS_CERT` / `PQPQ_TLS_KEY` | `certs/localhost.pem` / `certs/localhost-key.pem` |
+| `PQPQ_PIN_WEB_CERT` | `false`。開発用の14日以内・ECDSA証明書では `true` |
+| `PQPQ_SERVER_ADDR` | クライアント接続先。既定 `localhost:4433` |
+| `PQPQ_TLS_SERVER_NAME` | 接続先証明書の名前。既定は接続先ホスト |
+| `PQPQ_CA_FILE` | ネイティブクライアントの信頼するCAのPEM |
+| `PQPQ_MAX_CONNECTIONS` / `PQPQ_MAX_ROOMS` | 128 / 64 |
+| `PQPQ_MAX_ROOM_PLAYERS` / `PQPQ_MIN_RACERS` | 32 / 2。観戦者も接続人数に含む。1人検証では最少人数を1にする |
+
+公開時は公開ホストに有効な証明書を指定し、HTTPSとWebTransportを同じ公開ホスト・ポートで提供します。Nativeの接続先も配布先へ設定します。秘密鍵はWeb配信ディレクトリ外に置きます。サーバは1プロセスで静的配信も行うため、別のWebサーバやDBは不要です。
+
+全ゲーム状態はRAMのみです。サーバ再起動で復元せず、再接続は新しいPlayerになります。ブラウザのCookie・Web Storageへプレイヤー情報を保存しません。証明書・配布物・試験の出力はゲーム履歴とは別に扱います。
+
+## 検証
+
+```sh
+cargo fmt --all -- --check
+cargo test --workspace --locked
+node scripts/build-web.mjs
+node web/check.mjs
+```
+
+実際のChromiumとNative QUICをつないだ受入試験:
+
+```sh
+cd web
+npm ci
+npx playwright install chromium
+npm run test:crossplay
+npm run test:crossplay -- --impaired
+```
+
+この試験は検証用サーバと短期証明書を作り、既存サーバとは別ポートで動作します。ブラウザはテスト証明書の公開鍵だけをHTTPSで信頼する専用プロセスを使い、WebTransportでは実際のアプリのハッシュ設定を使います。OSの信頼ストアは変更しません。テスト用の操作で両者を3周走らせ、確定結果の一致・退出後の部屋削除・繰り返し再参加を検証します。テスト用の自動操作は通常のゲームには組み込みません。
+
+`--impaired` は両クライアントのQUICパケットに双方向5%欠落、片道25±20msの遅延、10%のパケットへの追加50ms遅延による順序逆転を加えます。制御StreamとDatagramの両方が同じ転送器を通ります。
+
+実行結果とスクリーンショットは `target/crossplay/run-*/` に出力します。異なるOS・ブラウザの組み合わせやネットワーク劣化試験は、[基本設計書](docs/basic-design.md)の受入条件に沿って実施します。
+
+詳細は[要件定義](docs/requirements.md)、[基本設計書](docs/basic-design.md)、[WASMのビルド手順](web/README.md)を参照してください。

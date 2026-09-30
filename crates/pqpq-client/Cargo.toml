@@ -1,0 +1,17 @@
+[package]
+name = "pqpq-client"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "pqpq"
+path = "src/main.rs"
+
+[dependencies]
+pqpq-protocol = { path = "../pqpq-protocol" }
+pqpq-sim = { path = "../pqpq-sim" }
+crossterm = "0.29"
+quiche = "0.30.0"
+boring = "5.2"
+ratatui = "0.30"
+tokio = { version = "1", features = ["rt", "macros", "net", "time", "sync"] }

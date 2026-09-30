@@ -1,0 +1,13 @@
+[package]
+name = "pqpq-web"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+pqpq-protocol = { path = "../pqpq-protocol" }
+pqpq-sim = { path = "../pqpq-sim" }
+wasm-bindgen = "=0.2.129"
+js-sys = "0.3"
