@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>pqpq</title>
+    <link rel="stylesheet" href="./style.css">
+    <script type="module" src="./app.js"></script>
+  </head>
+  <body>
+    <main>
+      <h1>pqpq</h1>
+
+      <section id="loading">
+        <p role="status">読み込み中…</p>
+      </section>
+
+      <section id="join" hidden>
+        <form id="join-form" novalidate>
+          <label>Name <input id="name" autocomplete="off" spellcheck="false" required></label>
+          <label>Room <input id="room" autocomplete="off" spellcheck="false" maxlength="32" required></label>
+          <button id="join-button" type="submit" disabled>JOIN</button>
+          <p id="form-error" class="error" role="alert"></p>
+        </form>
+        <p class="hint">ターミナル版 <code>pqpq &lt;username&gt; &lt;room_id&gt;</code> と同じ部屋で対戦できます。</p>
+      </section>
+
+      <section id="connecting" hidden>
+        <p role="status">接続中… ROOM <span id="connecting-room"></span></p>
+      </section>
+
+      <section id="lobby" hidden>
+        <h2>待機室 · ROOM <span id="lobby-room"></span></h2>
+        <ul id="roster" class="list"></ul>
+        <p id="lobby-rule"></p>
+        <p class="hint">共有URL: <span id="share"></span></p>
+        <div class="buttons">
+          <button id="ready" type="button">READY (Enter)</button>
+          <button class="leave" type="button">退出</button>
+        </div>
+        <p class="notice" role="status"></p>
+      </section>
+
+      <section id="race" hidden>
+        <p id="hud" class="hud"></p>
+        <div class="race-layout">
+          <canvas id="track" aria-label="コースと車両"></canvas>
+          <ol id="standings" class="list"></ol>
+        </div>
+        <p id="hud2" class="hud"></p>
+        <p class="notice" role="status"></p>
+        <p class="hint">↑/W 加速 · ↓/S ブレーキ · ←/→ または A/D 操舵
+          <button class="leave" type="button">退出</button></p>
+      </section>
+
+      <section id="results" hidden>
+        <h2>結果 · ROOM <span id="results-room"></span></h2>
+        <table>
+          <thead><tr><th>順位</th><th>車</th><th>名前</th><th>タイム</th></tr></thead>
+          <tbody id="result-rows"></tbody>
+        </table>
+        <p class="hint">全員が退出すると部屋は削除され、同じ部屋IDで新しいレースを始められます。</p>
+        <button class="leave" type="button">退出</button>
+      </section>
+
+      <section id="error" hidden>
+        <h2>参加できません</h2>
+        <p id="error-message" class="error" role="alert"></p>
+        <p class="hint">再読み込みすると新しいプレイヤーとして参加できます。ブラウザで参加できない場合はターミナル版 <code>pqpq</code> を利用してください。</p>
+        <button id="reload" type="button">再読み込み</button>
+      </section>
+    </main>
+  </body>
+</html>

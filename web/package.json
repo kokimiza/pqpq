@@ -1,0 +1,11 @@
+{
+  "name": "pqpq-web-tools",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node ../scripts/build-web.mjs",
+    "test": "node check.mjs",
+    "test:crossplay": "node ../scripts/crossplay.mjs"
+  },
+  "devDependencies": { "playwright": "1.63.0" }
+}
